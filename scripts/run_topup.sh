@@ -1,8 +1,10 @@
 #!/bin/bash
-# Top-up to n=8 seeds on the 3 most promising tasks (MRPC, CoLA, RTE).
-# Adds 3 new seeds (65, 75, 85) for 2 ablations -> 18 additional runs.
+# Top-up to n=8 seeds across ALL 5 tasks (pre-registration clean: no
+# data-driven task selection). Adds 3 new seeds (65, 75, 85) for 2
+# ablations -> 30 additional runs.
+#
 # At n=8 the one-sided Wilcoxon floor is 1/2^8 = 0.004, well below
-# Holm's alpha/3 = 0.017 first-rank threshold.
+# Holm's alpha/5 = 0.01 first-rank threshold.
 #
 # Usage:
 #   nohup bash scripts/run_topup.sh > topup.log 2>&1 &
@@ -22,13 +24,15 @@ STAMP=$(date +%Y%m%d_%H%M%S)
 PROGRESS=logs/topup_${STAMP}.log
 
 NEW_SEEDS="65 75 85"
-TASKS=(rte mrpc cola)
+# Fast tasks first, so any environment issue surfaces on cheap runs
+# before burning hours on SST-2.
+TASKS=(rte mrpc stsb cola sst2)
 ABLATIONS=(salsvd random)
 
 echo "=== paramgrain top-up started $(date) ===" | tee -a "$PROGRESS"
 echo "    seeds: $NEW_SEEDS"                      | tee -a "$PROGRESS"
 echo "    tasks: ${TASKS[*]}"                     | tee -a "$PROGRESS"
-echo "    18 runs total (2 abl x 3 tasks x 3 seeds), ~1.5-2 hrs" | tee -a "$PROGRESS"
+echo "    30 runs total (2 abl x 5 tasks x 3 seeds), ~4-5 hrs" | tee -a "$PROGRESS"
 echo ""                                            | tee -a "$PROGRESS"
 
 i=0
