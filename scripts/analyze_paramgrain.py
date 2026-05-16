@@ -34,7 +34,7 @@ TASKS = ["SST2", "MRPC", "COLA", "STSB", "RTE"]
 # Base seeds always run; topup seeds added for MRPC/CoLA/RTE to unlock
 # Holm under tighter Wilcoxon floors. Analysis uses whatever pairs exist
 # in both arms per task.
-SEEDS = [15, 25, 35, 45, 55, 65, 75, 85]
+SEEDS = [15, 25, 35, 45, 55, 65, 75, 85, 95, 105]
 TARGET_BUDGET = 600_000
 
 # Best-eval metric key per task (W&B summary field; matches paramgrain_lora.py).
