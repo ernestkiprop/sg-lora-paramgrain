@@ -59,7 +59,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # ----- Constants --------------------------------------------------------
 
-MODEL_NAME = "roberta-base"
+DEFAULT_MODEL = "roberta-base"
 LORA_ALPHA_PER_RANK = 2  # so per-module alpha = 2*r (matches r=8/alpha=16)
 LORA_DROPOUT = 0.1
 WEIGHT_DECAY = 0.01
@@ -67,6 +67,20 @@ SEEDS_TO_RUN = [15, 25, 35, 45, 55]
 DEFAULT_BUDGET = 600_000  # ~LoRA-AllAttn r=8 (the parent paper's recommended baseline)
 SAL_BATCH_SIZE = 8
 SAL_PERCENT = 0.05  # 5% sample for saliency pass
+
+
+def _project_name(task: str, ablation: str, model_name: str) -> str:
+    """W&B project name; suffixes with `-Large` etc. for non-base models so
+    base and larger-scale runs land in distinct projects but the n=10 base
+    pilot keeps its original project names (no suffix)."""
+    suffix = ""
+    if model_name == "roberta-large":
+        suffix = "-Large"
+    elif model_name != "roberta-base":
+        short = model_name.split("/")[-1]
+        suffix = "-" + short.replace("-", "").capitalize()
+    return f"{task.upper()}-ParamGrain-{ablation.capitalize()}{suffix}-LoRA-5-Seeds-2"
+
 
 # Module-name suffixes for the 6 LoRA-targetable Linears per encoder block.
 # (We use full module paths in target_modules so attention.output.dense and
@@ -116,7 +130,7 @@ def is_target_module(name: str) -> bool:
 
 # ----- Saliency pass: per-parameter |grad . weight| ---------------------
 
-def collect_saliency_matrices(task: str, seed: int,
+def collect_saliency_matrices(task: str, seed: int, model_name: str,
                                is_smoke_test: bool = False) -> Dict[str, torch.Tensor]:
     """Run one forward-backward over a 5% train sample with the frozen
     backbone. Return |grad . weight| accumulated per target Linear (mean
@@ -125,9 +139,9 @@ def collect_saliency_matrices(task: str, seed: int,
     device = "cuda" if torch.cuda.is_available() else "cpu"
     d_cfg = DATASET_CONFIGS[task]
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_NAME, num_labels=d_cfg["num_labels"],
+        model_name, num_labels=d_cfg["num_labels"],
         problem_type="regression" if task == "stsb" else None,
     ).to(device)
     model.train()  # need .grad set; we don't actually update weights
@@ -360,9 +374,9 @@ def fine_tune_model(cfg: dict, ranks: Dict[str, int],
 
 # ----- W&B resume helper ------------------------------------------------
 
-def fetch_completed_runs(task: str, ablation: str) -> set:
+def fetch_completed_runs(task: str, ablation: str, model_name: str) -> set:
     api = wandb.Api()
-    project = f"{task.upper()}-ParamGrain-{ablation.capitalize()}-LoRA-5-Seeds-2"
+    project = _project_name(task, ablation, model_name)
     try:
         entity = api.viewer.entity
         runs = api.runs(f"{entity}/{project}", filters={"state": "finished"})
@@ -382,13 +396,15 @@ def fetch_completed_runs(task: str, ablation: str) -> set:
 
 def run_single_experiment(cfg: dict) -> None:
     set_seed(cfg["seed"])
-    project = f"{cfg['dataset_name'].upper()}-ParamGrain-{cfg['ablation'].capitalize()}-LoRA-5-Seeds-2"
+    project = _project_name(cfg["dataset_name"], cfg["ablation"], cfg["model_name"])
     wandb.init(project=project, name=cfg["run_name"], group=cfg["group"], config=cfg)
 
-    print(f"\n--- Saliency pass ({cfg['dataset_name']}, seed={cfg['seed']}) ---")
+    print(f"\n--- Saliency pass ({cfg['dataset_name']}, seed={cfg['seed']}, "
+          f"model={cfg['model_name']}) ---")
     t0 = time.time()
     saliencies = collect_saliency_matrices(
-        cfg["dataset_name"], cfg["seed"], is_smoke_test=cfg.get("is_smoke_test", False)
+        cfg["dataset_name"], cfg["seed"], cfg["model_name"],
+        is_smoke_test=cfg.get("is_smoke_test", False),
     )
     t_sal = time.time() - t0
 
@@ -430,10 +446,11 @@ def run_single_experiment(cfg: dict) -> None:
 
 
 def run_study(task: str, seed: int, ablation: str, budget: int,
+              model_name: str = DEFAULT_MODEL,
               is_smoke: bool = False, skip_completed: set = None) -> None:
     hp = TASK_HPARAMS[task]
     base_cfg = {
-        "model_name": MODEL_NAME, "dataset_name": task,
+        "model_name": model_name, "dataset_name": task,
         "ablation": ablation, "ablation_type": f"PARAMGRAIN_{ablation.upper()}",
         "lora_dropout": LORA_DROPOUT, "weight_decay": WEIGHT_DECAY,
         "batch_size": BATCH_SIZE, "seed": seed, "budget": budget,
@@ -466,6 +483,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", required=True, choices=list(DATASET_CONFIGS))
     ap.add_argument("--ablation", required=True, choices=["salsvd", "random"])
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help=f"HuggingFace model id (default {DEFAULT_MODEL}). "
+                         f"Tested: roberta-base, roberta-large.")
     ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--seeds", type=int, nargs="+", default=SEEDS_TO_RUN)
     ap.add_argument("--budget", type=int, default=DEFAULT_BUDGET,
@@ -479,18 +499,21 @@ def main():
         BATCH_SIZE = args.batch_size
 
     if args.smoke:
-        print(f"\n[SMOKE TEST] task={args.task}  ablation={args.ablation}\n")
+        print(f"\n[SMOKE TEST] task={args.task}  ablation={args.ablation}  "
+              f"model={args.model}\n")
         run_study(args.task, seed=42, ablation=args.ablation,
-                   budget=args.budget, is_smoke=True)
+                   budget=args.budget, model_name=args.model, is_smoke=True)
         return
 
-    skip = fetch_completed_runs(args.task, args.ablation) if args.resume else None
+    skip = (fetch_completed_runs(args.task, args.ablation, args.model)
+            if args.resume else None)
     print(f"\n[FULL RUN] task={args.task}  ablation={args.ablation}  "
-          f"seeds={args.seeds}  budget={args.budget}"
+          f"model={args.model}  seeds={args.seeds}  budget={args.budget}"
           + ("  (resuming)" if args.resume else "") + "\n")
     for seed in args.seeds:
         run_study(args.task, seed=seed, ablation=args.ablation,
-                   budget=args.budget, is_smoke=False, skip_completed=skip)
+                   budget=args.budget, model_name=args.model,
+                   is_smoke=False, skip_completed=skip)
 
 
 if __name__ == "__main__":
